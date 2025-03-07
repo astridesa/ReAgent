@@ -20,9 +20,6 @@ class Message:
       - timestamp (when the message was created or dispatched)
       - msg_id (a unique UUID to distinguish messages unambiguously)
 
-    This structure supports concurrency, multi-agent backtracking, and advanced
-    searching or filtering by ID or time. Agents and environments use these
-    messages to coordinate steps, detect conflicts, and manage rollbacks.
     """
 
     def __init__(
