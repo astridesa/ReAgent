@@ -37,8 +37,6 @@ from Interaction.messagepool import MessagePool, message_pool
 from DataProcess.Hotpotqa import HotpotQA
 from DataProcess.Dataset import HotpotqaDataset
 
-
-
 from Agent.agent import BaseAgent  
 
 class Args:
@@ -47,7 +45,7 @@ class Args:
         self.temperature = 1.0            # LLM temperature
         self.mas = True                   # whether multi-agent synergy is enabled
         self.truth = False                # whether to enable trust-based disclaimers
-        self.dataset_path = "./hotpotqa_dev.json"  # default dataset path for demonstration
+        self.dataset_path = "Your Path"  # default dataset path for demonstration
         self.debug = False                # debug flag for extra logging
 
 
