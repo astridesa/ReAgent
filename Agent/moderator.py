@@ -1,50 +1,64 @@
-import json
-import time
+# =========================================================================================
+# Moderator
+# =========================================================================================
+# This Moderator class coordinates a straightforward multi-agent reasoning process,
+# consistent with the original multi-agent framework described in the paper. It does not
+# include additional agents like Human or BlackSheep by default.
+#
+# Note:
+#   - This file does NOT integrate the optional "Human" or "BlackSheep" agents. For a
+#     more advanced approach, see "moderator2.py".
+# =========================================================================================
 
+import time
 from Agent.agent import Agent
-from backend.api import api_call, api_call_completion
+from backend.api import api_call_completion
 from Interaction.messagepool import message_pool
 
 class Moderator(Agent):
     """
-    The Moderator class coordinates the step-by-step reasoning process and optionally
-    engages other agents (e.g., a multi-agent group) to vote on or revise the reasoning.
-    It uses a prompt format that instructs the model to return reasoning steps prefixed
-    by "Step x:" and eventually a "Final Answer" step.
+    This Moderator orchestrates multi-step reasoning by prompting an LLM with
+    a chain-of-thought request. It stops when it detects "Final Answer" or hits
+    a maximum iteration threshold. By default, it does not incorporate external
+    agents like Human or BlackSheep.
     """
+
     _name = "moderator"
 
     def __init__(self, name: str = None, model: str = "deepseek-v3"):
         """
-        :param name: Name of the Moderator agent. Defaults to 'moderator' if None.
-        :param model: The model identifier used for stepwise completions (e.g., 'deepseek-v3').
+        :param name: The Moderator's name. Defaults to '_name' if None.
+        :param model: An identifier for the language model used in chain-of-thought.
         """
-        super().__init__(name=name if name is not None else self._name, model=model)
-        self.modifly = None
+        super().__init__(name=name if name else self._name, model=model)
         self.current_text = None
         self.current_step = 1
         self.iteration = 0
         self.steps = []
         self.final_answer = None
+        self.messages = []
 
-    def generate_step_response(self, prompt):
+    def generate_step_response(self, prompt: str):
         """
-        A generator that repeatedly queries the model using 'api_call_completion',
-        stopping at each 'Step x:' marker or the next step. 
-        At each iteration, it yields the raw step content.
+        A generator function that repeatedly queries the LLM using 'api_call_completion'.
+        Each iteration:
+          1. Sends the updated message history (including the previous step) to the LLM.
+          2. Waits for a new step. We use 'stop_list=[f"Step {self.current_step+1}:"]'
+             to break the output at the next step marker.
+          3. Yields the raw step text.
         """
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
+        self.messages = [{"role": "user", "content": prompt}]
 
         while True:
-            if self.current_step != 1:
-                messages.append({"role": "assistant", "content": self.current_text})
+            if self.current_step != 1 and self.current_text:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": self.current_text
+                })
 
             start_time = time.time()
-            # We use 'stop_list' to break the response at the next 'Step x:' section
             step_resp = api_call_completion(
-                messages,
+                messages=self.messages,
                 model=self.model,
                 stop_list=[f"Step {self.current_step+1}:"]
             )
@@ -52,94 +66,70 @@ class Moderator(Agent):
 
             thinking_time = end_time - start_time
             self.current_text = step_resp
-            self.steps.append((step_resp, None))
-            self.messages = messages
+            self.steps.append((step_resp, thinking_time))
 
             yield step_resp
 
-    def cot(self, task, question, knowledges, group, args):
+    def cot(self, question: str, additional_knowledge: str = None, max_steps: int = 15):
         """
-        The core chain-of-thought (CoT) method. It sets up a prompt that asks for each
-        step to begin with 'Step x:' and end with '[End]', up to the 'Final Answer',
-        then iterates through responses. If multi-agent collaboration is enabled,
-        other agents can vote after each step to decide whether a revision is needed.
+        The primary chain-of-thought (CoT) method:
+        1. Builds a prompt requiring each step to begin with 'Step x:' and end with '[End]'.
+        2. Iterates through the step responses until 'Final Answer' is found or 'max_steps'.
+        3. Returns the final answer and the entire step list.
+
+        :param question: The user query or problem to solve.
+        :param additional_knowledge: Optional extra context or knowledge to embed in the prompt.
+        :param max_steps: The maximum number of steps before stopping.
+        :return: (final_answer, steps)
         """
-        self.args = args
-        # Construct the multi-step reasoning prompt
-        self.cot_prompt = (
-            f"""{question}
+        if additional_knowledge is None:
+            additional_knowledge = ""
 
-Please reason step by step, and each step should begin with "Step x:" and end with "[End]". 
-Each step should be detailed, limited to 256 tokens, and if the question is complex (e.g., zebra logic),
-you can use markdown tables to better structure the reasoning. 
-Finally, provide the final answer in a single step starting with "Final Answer" and ending with "[End]".
-
-Example:
-Step 1: Explanation here [End]
-Step 2: Next reasoning here [End]
-Step 3: Another step [End]
-...
-Final Answer: The final answer text [End]
-"""
+        chain_prompt = (
+            f"{question}\n\n"
+            "Please reason step by step. Each step starts with \"Step x:\" and ends with \"[End]\".\n"
+            "If the problem is complex, you may use structured reasoning or tables.\n"
+            "Conclude with a \"Final Answer:\" step.\n\n"
+            "Example:\n"
+            "Step 1: Explanation [End]\n"
+            "Step 2: Reasoning [End]\n"
+            "Final Answer: The final text [End]\n\n"
+            f"Additional Knowledge:\n{additional_knowledge}\n"
         )
 
-        summary = None
         final_flag = False
+        final_answer_text = None
 
-        # Call the step response generator
-        for step in self.generate_step_response(self.cot_prompt):
-            if step == self.steps[-1][0]:
-                self.iteration += 1
-
-            if self.iteration >= 5:
-                return step, self.steps
-
-            self.current_text = step
-            print()
-            self.say(step)
-
-            # If multi-agent system is enabled, request votes from other agents
-            if args.mas:
-                vote_results = [agent.vote(question, knowledges) for agent in group.people]
-                # If majority vote indicates a need for revision
-                if sum(vote_results) > len(vote_results) / 2:
-                    messages = message_pool.get_visibile_messages()[1:]
-                    content = '\n'.join([f"{message.send_from}: {message.content}" for message in messages])
-                    mod_step, history = group.start(
-                        n_round=2,
-                        task=task,
-                        current_step=self.current_text,
-                        preious_content=content,
-                        knowledges=knowledges
-                    )
-                    self.current_text = mod_step
-                    self.steps[-1] = (self.current_text, history)
-
-            # Check if the step indicates a final answer
-            if "Final Answer" in self.current_text and "[End]" in self.current_text:
+        # Start generating steps
+        for step_text in self.generate_step_response(chain_prompt):
+            self.iteration += 1
+            # Print or log the step
+            print(f"--- Step {self.current_step} Output Start ---\n{step_text}\n--- End ---")
+            # Check for final answer
+            if "Final Answer" in step_text and "[End]" in step_text:
                 final_flag = True
-                # If the task includes multiple choices, ask for a direct selection
-                if hasattr(task, "choices"):
-                    self.messages.append({
-                        "role": "user",
-                        "content": (
-                            task.question +
-                            f" Based on the reasoning steps above, provide the answer chosen from {task.choices} directly."
-                        )
-                    })
-                else:
-                    self.messages.append({
-                        "role": "user",
-                        "content": task.question + " Based on the reasoning steps above, please provide the direct answer."
-                    })
-
-                while self.final_answer is None:
-                    self.final_answer = api_call(self.messages, model=args.model)
-                self.steps.append((self.final_answer, None))
-
-            if final_flag:
-                if self.final_answer is None:
-                    pass
-                return self.final_answer, self.steps
+                final_answer_text = step_text
+                break
+            if self.iteration >= max_steps:
+                break
 
             self.current_step += 1
+
+        return (final_answer_text, self.steps)
+
+
+def main():
+    """
+    Basic usage demonstration. This minimal example does not show multi-agent voting,
+    but references the same pipeline used in the rest of the system.
+    """
+    mod = Moderator(name="MyModerator", model="deepseek-v3")
+    question = "Which US state hosted the 1984 Summer Olympics and has a smaller capital city than its largest city?"
+    additional_knowledge = "Facts about US states, capitals, and city sizes."
+    final_ans, steps = mod.cot(question, additional_knowledge)
+
+    print("\n===== Final Answer =====")
+    print(final_ans)
+
+if __name__ == "__main__":
+    main()
